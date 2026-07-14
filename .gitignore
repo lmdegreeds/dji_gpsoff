@@ -1,0 +1,7 @@
+build/
+build-test/
+*.apk
+*.idsig
+# телеметрия — секрет держим приватным, никогда не коммитим
+assets/telemetry.b64
+telemetry_secret*
