@@ -83,7 +83,7 @@ public final class MainActivity extends Activity {
             new String[]{ "gps_enable", "g_config.gps_cfg.gps_enable" }, "U8",
             1, "вкл", 0, "выкл");
 
-    private final QP LED = new QP("forearm_led_ctrl", "Передние LED",
+    private final QP LED = new QP("forearm_led_ctrl", "LED",
             new String[]{ "forearm_led_ctrl", "g_config.misc_cfg.forearm_lamp_ctrl" }, "U8",
             239, "вкл", 0, "выкл");
 
