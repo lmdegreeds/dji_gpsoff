@@ -34,10 +34,29 @@ public final class Duml {
     private volatile boolean up = false;
 
     private static final class Reply {
-        final long seq; final int set, id, index; final byte[] pl;
-        Reply(long seq, int set, int id, int index, byte[] pl) {
-            this.seq = seq; this.set = set; this.id = id; this.index = index; this.pl = pl;
+        final long seq; final int set, id, index, frameSeq, src, dst; final byte[] pl;
+        Reply(long seq, int set, int id, int index, int frameSeq, int src, int dst, byte[] pl) {
+            this.seq = seq; this.set = set; this.id = id; this.index = index;
+            this.frameSeq = frameSeq; this.src = src; this.dst = dst; this.pl = pl;
         }
+    }
+
+    /**
+     * Номер запроса: раньше в каждый кадр писался литеральный 0, поэтому ответ можно было
+     * сопоставлять только по (cmd_set, cmd_id, index) — и посторонний кадр с теми же полями
+     * мог быть принят за наш. Ставим монотонный номер и МЕРЯЕМ, эхорит ли его борт;
+     * сопоставление пока остаётся прежним — переключать его вслепую нельзя, иначе при
+     * отсутствии эха разом отвалятся все чтения.
+     */
+    private final java.util.concurrent.atomic.AtomicInteger seqGen =
+            new java.util.concurrent.atomic.AtomicInteger((int) (System.nanoTime() & 0xFFF) + 0x1000);
+    private volatile int seqEchoHits = 0, seqEchoTotal = 0;
+    private volatile int routeOkCount = 0, routeOddCount = 0;
+
+    /** Статистика для пакета диагностики: эхо номера кадра и маршрутизация ответов. */
+    public String linkStats() {
+        return "seq_echo=" + seqEchoHits + "/" + seqEchoTotal
+                + " route_ok=" + routeOkCount + " route_odd=" + routeOddCount;
     }
     private volatile boolean running = false;
     private volatile long lastRx = 0;
@@ -54,7 +73,6 @@ public final class Duml {
     private final HashMap<String, Integer> codeSeen = new HashMap<>();
 
     public boolean isUp() { return running && up && (System.currentTimeMillis() - lastRx) < 4000; }
-    public boolean running() { return running; }
     public String acSerial() { return acSerial; }
     public String rcModel() { return rcModel; }
     public String acModel() { return acModel; }
@@ -102,15 +120,17 @@ public final class Duml {
                         if (crc8(buf, i, 3) != (buf[i + 3] & 0xFF)) { i++; continue; }
                         int exp = (buf[i + len - 2] & 0xFF) | ((buf[i + len - 1] & 0xFF) << 8);
                         if (crc16(buf, i, len - 2) != exp) { i++; continue; }
-                        int src = buf[i + 4] & 0xFF, typ = buf[i + 8] & 0xFF,
+                        int src = buf[i + 4] & 0xFF, dst = buf[i + 5] & 0xFF,
+                            typ = buf[i + 8] & 0xFF,
                             set = buf[i + 9] & 0xFF, id = buf[i + 10] & 0xFF;
+                        int fseq = (buf[i + 6] & 0xFF) | ((buf[i + 7] & 0xFF) << 8);
                         byte[] pl = new byte[len - 13];
                         System.arraycopy(buf, i + 11, pl, 0, pl.length);
-                        capture(src, set, id, pl);
+                        capture(src, set, id, pl);   // ВСЕ кадры: serial и acModel приходят из чужих броадкастов
                         if ((typ & 0x80) != 0) {   // reply-flagged frame
                             int idx = pl.length >= 6 ? (pl[4] & 0xFF) | ((pl[5] & 0xFF) << 8) : -1;
                             synchronized (ready) {
-                                ready.add(new Reply(++seqCounter, set, id, idx, pl));
+                                ready.add(new Reply(++seqCounter, set, id, idx, fseq, src, dst, pl));
                                 if (ready.size() > 4096) ready.remove(0);
                             }
                         }
@@ -152,6 +172,19 @@ public final class Duml {
         return (int) Math.max(t, hintMs);
     }
 
+    /**
+     * Собрать статистику по принятому ответу — ТОЛЬКО измерение, без фильтрации.
+     * По этим числам (они уходят в диагностику) станет видно, можно ли вообще сопоставлять
+     * ответы по эху номера кадра и по обратной маршрутизации. Роутер зеркалит в 40007 весь
+     * downstream и вполне может переписывать отправителя для непривилегированного uid —
+     * поэтому жёсткая проверка без данных выбросила бы наши же ответы.
+     */
+    private void noteReplyShape(Reply m, int mySeq) {
+        seqEchoTotal++;
+        if (m.frameSeq == mySeq) seqEchoHits++;
+        if (m.src == FC && m.dst == APP) routeOkCount++; else routeOddCount++;
+    }
+
     /** Feed a successful round-trip time into the EWMA (alpha≈0.25), clamped to a sane band. */
     private void noteRtt(long ms) {
         long e = (rttEwmaMs * 3 + ms) / 4;
@@ -164,7 +197,8 @@ public final class Duml {
         if (!running) return null;
         long mark;
         synchronized (ready) { mark = seqCounter; }   // only replies newer than this can be ours
-        byte[] pkt = build(cmdSet, cmdId, payload);
+        final int mySeq = seqGen.getAndIncrement() & 0xFFFF;
+        byte[] pkt = build(cmdSet, cmdId, payload, mySeq);
         Socket s = new Socket();
         try {
             s.setTcpNoDelay(true);
@@ -187,6 +221,7 @@ public final class Duml {
                         if (m.seq <= mark) break;
                         if (m.set == cmdSet && m.id == cmdId && (wantIndex < 0 || m.index == wantIndex)) {
                             noteRtt(System.currentTimeMillis() - t0);
+                            noteReplyShape(m, mySeq);
                             return m.pl;
                         }
                     }
@@ -195,69 +230,6 @@ public final class Duml {
             }
         } finally { try { s.close(); } catch (Throwable t) {} }
         return null;
-    }
-
-    // ---- fcc-style full name scan (one persistent inject socket) ----
-
-    public interface ScanCb { void progress(int idx, int count, int named); boolean cancelled(); }
-
-    /**
-     * fcc-style live name map: get_info (0xE1) over every index 0..count to read the real parameter
-     * name straight from the board, building index→name. Mirrors fcc's C0046i loop but reuses our
-     * proven transport — ONE persistent 40008 inject socket for all requests (no per-request socket
-     * churn, the slow part before), replies collected by the running 40007 reader. So start() must be
-     * up and DJI Fly CLOSED (the scan reads on 40007). Retries up to 3× per index like fcc.
-     */
-    public java.util.LinkedHashMap<Integer, String> scanNames(int table, int count, ScanCb cb) {
-        java.util.LinkedHashMap<Integer, String> map = new java.util.LinkedHashMap<>();
-        if (!running || count <= 0) return map;
-        Socket s = new Socket();
-        try {
-            s.setTcpNoDelay(true);
-            s.connect(new InetSocketAddress("127.0.0.1", 40008), 1500);
-            OutputStream out = s.getOutputStream();
-            final int BATCH = 128;
-            for (int start = 0; start < count && running; start += BATCH) {
-                if (cb != null && cb.cancelled()) break;
-                int endIdx = Math.min(count, start + BATCH);
-                // indices we still need a reply for in this batch (empty slots simply never resolve)
-                java.util.HashSet<Integer> missing = new java.util.HashSet<>();
-                for (int i = start; i < endIdx; i++) missing.add(i);
-                // up to 2 pipelined passes: fire ALL missing back-to-back, then harvest by index
-                for (int pass = 0; pass < 2 && !missing.isEmpty() && running; pass++) {
-                    long mark; synchronized (ready) { mark = seqCounter; }
-                    for (int idx : new java.util.ArrayList<>(missing)) {
-                        byte[] p = { (byte) table, (byte) (table >> 8), (byte) idx, (byte) (idx >> 8) };
-                        try { out.write(build(SET, GET_INFO, p)); out.flush(); }
-                        catch (Throwable e) { Logger.w("[scan] write err: " + e); return map; }
-                        sleep(2);                                   // gentle pace so the router keeps up
-                    }
-                    // harvest: drain replies until the stream dries up (no new match for 450ms) or hard cap
-                    long lastGot = System.currentTimeMillis();
-                    long hardEnd = lastGot + missing.size() * 8L + 900;
-                    while (!missing.isEmpty() && System.currentTimeMillis() < hardEnd && running) {
-                        boolean got = false;
-                        synchronized (ready) {
-                            for (int k = ready.size() - 1; k >= 0; k--) {
-                                Reply m = ready.get(k);
-                                if (m.seq <= mark) break;
-                                if (m.set == SET && m.id == GET_INFO && missing.remove(m.index)) {
-                                    String nm = nameFromInfo(m.pl);
-                                    if (nm != null && !nm.isEmpty()) map.put(m.index, nm);
-                                    got = true;
-                                }
-                            }
-                        }
-                        if (got) lastGot = System.currentTimeMillis();
-                        else { if (System.currentTimeMillis() - lastGot > 450) break; sleep(8); }
-                    }
-                }
-                if (cb != null) cb.progress(endIdx, count, map.size());
-            }
-        } catch (Throwable e) {
-            Logger.w("[scan] socket err: " + e);
-        } finally { try { s.close(); } catch (Throwable t) {} }
-        return map;
     }
 
     /** Name = NUL-terminated ASCII at offset 22 of a get_info reply payload (fcc/2017 layout). */
@@ -278,31 +250,15 @@ public final class Duml {
     // so a wrong index on a different firmware/model can't clobber an unrelated parameter.
 
     /**
-     * get_info (0xE1): the real parameter name the board reports at this index. Returns "" if the
-     * board answered but with a non-zero status, or null if there was no reply at all.
-     */
-    public String getInfoName(int table, int index, int timeoutMs) {
-        // single-shot: get_info is frequently silent on this FC, so retrying just burns the timeout;
-        // name verification only ever BLOCKS a write on a positive mismatch, never on a null.
-        byte[] pl = request(SET, GET_INFO, reqPayload(table, index, null), index, timeoutMs);
-        if (pl == null) return null;
-        long status = u32(pl, 0);
-        if (status != 0) { Logger.w("[duml] get_info idx=" + index + " status=" + status); return ""; }
-        // name = trailing NUL-terminated ASCII run (after <index><attr><type><default><min><max>)
-        int end = pl.length;
-        while (end > 0 && pl[end - 1] == 0) end--;
-        int start = end;
-        while (start > 0 && (pl[start - 1] & 0xFF) >= 0x20 && (pl[start - 1] & 0xFF) < 0x7f) start--;
-        String name = end > start ? new String(pl, start, end - start) : "";
-        Logger.i("[duml] get_info idx=" + index + " name='" + name + "' raw=" + hex(pl));
-        return name;
-    }
-
-    /**
-     * get_info (0xE1) raw reply, or null. Uses the CORRECT 4-byte payload &lt;table:u16&gt;&lt;index:u16&gt;
-     * (NO unknown1 — the old getInfoName used a 6-byte payload, which this FC silently ignores).
-     * Reply layout (2017): status:u16, table:u16, index:u16, type_id:u16, size:u16, def[10:14],
-     * min[14:18], max[18:22], name\0. def/min/max are 4-byte fields (decode by type).
+     * get_info (0xE1) raw reply, or null.
+     *
+     * ВАЖНО — payload здесь 4-байтовый &lt;table:u16&gt;&lt;index:u16&gt;, БЕЗ поля unknown1.
+     * Ровно это и было главной поломкой старых сборок: они слали 6-байтовый вариант (как для
+     * read/write), борт его молча игнорировал, ни одно имя не читалось — и «поиск ничего не
+     * находит» выглядел как ограничение железа. Не «унифицировать» эту раскладку с reqPayload().
+     *
+     * Ответ (2017): status:u16, table:u16, index:u16, type_id:u16, size:u16, def[10:14],
+     * min[14:18], max[18:22], name\0. def/min/max — 4-байтовые поля (декодировать по типу).
      */
     public byte[] getInfoRaw(int table, int index, int timeoutMs) {
         byte[] pl = new byte[]{ (byte) table, (byte) (table >> 8), (byte) index, (byte) (index >> 8) };
@@ -321,49 +277,6 @@ public final class Duml {
         long status = (pl[0] & 0xFFL) | ((pl[1] & 0xFFL) << 8);
         if (status != 0) { Logger.w("[duml] 0xE0 status=" + status); return null; }
         return new long[]{ u32(pl, 4), u32(pl, 8) };
-    }
-
-    /** read_value (0xE2): current integer value at index, decoded by type. null if no reply / status!=0. */
-    public Long readParam(int table, int index, String type, int timeoutMs) {
-        byte[] pl = requestRead(SET, READ_VAL, reqPayload(table, index, null), index, timeoutMs);
-        if (pl == null) return null;
-        long status = u32(pl, 0);
-        if (status != 0) { Logger.w("[duml] read idx=" + index + " status=" + status); return null; }
-        if (pl.length < 6 + width(type)) { Logger.w("[duml] read idx=" + index + " short reply"); return null; }
-        return decodeInt(pl, 6, type);
-    }
-
-    /** write_value (0xE3): write an integer value. Returns DUML status (0 = OK), or -1 on no reply. */
-    public long writeParam(int table, int index, String type, long value, int timeoutMs) {
-        byte[] vb = encodeInt(type, value);
-        byte[] pl = request(SET, WRITE_VAL, reqPayload(table, index, vb), index, timeoutMs);
-        if (pl == null) { Logger.w("[duml] write idx=" + index + " no reply"); return -1; }
-        long status = u32(pl, 0);
-        Logger.i("[duml] write idx=" + index + " val=" + value + " status=" + status);
-        return status;
-    }
-
-    /** write_value (0xE3) with pre-encoded value bytes (used for floats). Status 0 = OK, -1 = no reply. */
-    public long writeValue(int table, int index, byte[] valueBytes, int timeoutMs) {
-        byte[] pl = request(SET, WRITE_VAL, reqPayload(table, index, valueBytes), index, timeoutMs);
-        if (pl == null) { Logger.w("[duml] write idx=" + index + " no reply"); return -1; }
-        long status = u32(pl, 0);
-        Logger.i("[duml] write idx=" + index + " (" + valueBytes.length + "b) status=" + status);
-        return status;
-    }
-
-    /** Encode a little-endian float (F32/F64). */
-    static byte[] encodeFloat(String type, double value) {
-        if ("F64".equals(type)) {
-            long bits = Double.doubleToLongBits(value);
-            byte[] b = new byte[8];
-            for (int i = 0; i < 8; i++) b[i] = (byte) (bits >> (8 * i));
-            return b;
-        }
-        int bits = Float.floatToIntBits((float) value);
-        byte[] b = new byte[4];
-        for (int i = 0; i < 4; i++) b[i] = (byte) (bits >> (8 * i));
-        return b;
     }
 
     static long u32(byte[] p, int off) {
@@ -459,27 +372,6 @@ public final class Duml {
         return sb.toString();
     }
 
-    /**
-     * Read one integer/float param's raw reply payload (<status:u32><index:u16><value>), or null.
-     * Used by the all-params lazy loader — deliberately ONE request per fresh socket, because on
-     * this RC hammering the DUML channel (socket churn or many requests per connection) storms the
-     * router's FPV mirror (DUSS5A fpv_sock Broken pipe / DUSS41 -1002). Keep reads gentle & paced.
-     */
-    public byte[] readRaw(int table, int index, int timeoutMs) {
-        return requestRead(SET, READ_VAL, reqPayload(table, index, null), index, timeoutMs);
-    }
-
-    /** Decode a little-endian float (F32/F64) at offset; NaN if the payload is too short. */
-    static double decodeFloat(byte[] p, int off, String type) {
-        if ("F64".equals(type)) {
-            if (p.length < off + 8) return Double.NaN;
-            long lv = 0; for (int i = 0; i < 8; i++) lv |= (p[off + i] & 0xFFL) << (8 * i);
-            return Double.longBitsToDouble(lv);
-        }
-        if (p.length < off + 4) return Double.NaN;
-        int iv = 0; for (int i = 0; i < 4; i++) iv |= (p[off + i] & 0xFF) << (8 * i);
-        return Float.intBitsToFloat(iv);
-    }
 
     static byte[] reqPayload(int table, int index, byte[] value) {
         int vlen = value == null ? 0 : value.length;
@@ -491,11 +383,16 @@ public final class Duml {
         return p;
     }
 
-    private static byte[] build(int cmdSet, int cmdId, byte[] payload) { return frame(cmdSet, cmdId, payload, FC, APP, 0); }
-    // Full DUML v1 frame with explicit dst/src/seq. src=0x02 for the normal 40008 path, 0x0A for the
-    // 40009 inject path (fcc uses 0x0A there). CRC8 init 0x77 + CRC16 init 0x3692 (see tables below).
+    private static byte[] build(int cmdSet, int cmdId, byte[] payload, int seq) {
+        return frame(cmdSet, cmdId, payload, FC, APP, seq);
+    }
+    // Full DUML v1 frame with explicit dst/src/seq. src=0x02 (APP) on our 40008 inject path.
+    // CRC8 init 0x77 + CRC16 init 0x3692 (see tables below).
     private static byte[] frame(int cmdSet, int cmdId, byte[] payload, int dst, int src, int seq) {
         int len = 13 + payload.length;
+        // Длина кадра — 10-битное поле (b[1] + 2 бита b[2]): всё от 1024 молча заворачивается,
+        // и борт роняет кадр без единой диагностики. Наши payload'ы ≤10 байт — это ассерт.
+        if (len > 1023) throw new IllegalArgumentException("duml frame " + len + " > 1023");
         byte[] b = new byte[len];
         b[0] = 0x55; b[1] = (byte) len; b[2] = (byte) ((1 << 2) | ((len >> 8) & 3));
         b[3] = (byte) crc8(b, 0, 3);
@@ -515,9 +412,9 @@ public final class Duml {
      * One-shot connect→write→close, NO reader, NO readback. This is the write half of our normal path
      * (40008 upstream inject, src=0x02) but WITHOUT opening the persistent 40007 reader — and it's the
      * 40007 reader that churns DJI Fly's video mirror (§4), not the inject. So a brief write here should
-     * not disturb Fly. Uses 40008, NOT 40009: fcc writes on 40009, but 40009 only routes injects from a
-     * privileged uid — from our untrusted app the identical frame on 40009 is silently dropped, while
-     * 40008 routes fine (confirmed on LitoX1: forearm_led_ctrl idx 23 toggles via 40008).
+     * not disturb Fly. Uses 40008, NOT 40009: 40009 only routes injects from a privileged uid — from our
+     * untrusted app the identical frame on 40009 is silently dropped, while 40008 routes fine
+     * (confirmed on LitoX1: forearm_led_ctrl idx 23 toggles via 40008).
      *
      * No confirmation is possible without the reader — returns true only if the frame was written to the
      * socket. Does NOT require start() to be up. Hold the socket ~600ms before close so the router has

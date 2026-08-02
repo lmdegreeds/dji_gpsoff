@@ -1,0 +1,18 @@
+#djiquick-models v1  params=forearm_led_ctrl,gps_enable,fswitch_selection  type=U8
+#P	индексы-пробы для опознания модели по содержимому
+#M	code	crc	counts	led	gps	fsw	boards	fp	label
+P	118	300	511	669	670	873
+M	wa020	2ae1a5ad	1571	4	53	466	wa020	baro_fdi_ope|imu0_y|follow_mouse|motor_overte|motor_overte|av_fdbk_lpf_	Neo 2
+M	wa140	b9b2b16e	1432,1433	1396	941	419	wa140	av_notch_x2_|fault_sum_hi|-|imu_cali_ui.|imu_cali_ui.|baro_fdi_ope	Mini 4 Pro
+M	wa141	3c662a43	1481	26	1403	460	wa141	av_notch_y1_|avoid_ascend|user_down_av|ap_fl_novice|g_config.fly|g_config.mod	Flip
+M	wa150	5f8b2ae1	1557,1558	23	640	138	wa150	-|enable_horiz|acc_fdi_open|gnss_source_|fscap_gnss_b|av_ffwd_dot2	Mini 5 Pro
+M	wa151	5f8b2ae1	1593	23	650	146	wa151	bat_debug_hi|plant_gain_u|tip1_x|-|-|horiz_envelo	Lito X1
+M	wa234	d0d68370	1513	362	918	593	wa234	av_notch_y3_|g_status.use|-|user_all_avo|active_safet|gps1_z	Air 3S
+M	wa341	ddb5b586	1550,1555	1510	1422	476	wa341	av_notch_y1_|-|enable_n_mod|fl_emergency|fl_head_foll|mode_tripod_	Mavic 4 Pro
+M	wa521	fe12e1ce	1477	45	312	786	wa521	imu0.vel_gro|uwb3_z|rc_sbus_0_A_|g_config.fly|g_config.fly|coord_mode_d	Neo
+M	wa530	430bd5b7	1557,1561	1527	310	1285	wa530	av_notch_y4_|gnss_assist_|gyr_fdi_open|imu0_y|imu0_z|rc_throttle_	Avata 360
+M	wm162	00000000	1220	930	523	143	wm162	avoid_cfg_rc|imu0_mount_y|user_test_ti|baro_fdi_ope|baro_fdi_ope|g_config.mod	Mini 3 Pro
+M	wm232	00000000	1375	758	733	659	wm232	ang_vel_tilt|imu2_directi|g_status.acc|trip_ffg_spe|api_ffg_spee|-	Air 2S
+M	wm233	b9b2b16e	1463	1426	960	440	wa233,wm233	av_notch_x2_|-|test_emergen|imu2_cali_st|imu0_cali_st|gyr_fdi_open	Air 3
+M	wm260	00000000	1311	398	372	287	wm260	-|vert_vel_dow|rc_throttle_|imu_app_temp|g_cfg_debug.|g_config.fdi	Mavic 3
+M	wm261	00000000	1415	1383	848	471	wm261	av_notch_x2_|disable_tof_|g_config.fly|rc_sbus_2_T_|rc_sbus_3_R_|gnss_source_	Mavic 3 Pro

@@ -37,15 +37,15 @@ public final class OverlayService extends Service {
     private final Duml duml = new Duml();   // write-only; start() is never called → no 40007 reader
     private final Handler main = new Handler(Looper.getMainLooper());
 
-    private String[] titles, onLabels, offLabels, types;
+    private String[] onLabels, offLabels, types;
     private int[] indices;
     private long[] onVals, offVals;
 
     @Override public IBinder onBind(Intent i) { return null; }
 
     @Override public int onStartCommand(Intent it, int flags, int startId) {
-        if (it != null && it.hasExtra("titles")) {
-            titles    = it.getStringArrayExtra("titles");
+        Logger.attachFile(this);              // нажатия в оверлее — в тот же журнал, что и мастер
+        if (it != null && it.hasExtra("indices")) {
             indices   = it.getIntArrayExtra("indices");
             onVals    = it.getLongArrayExtra("onVals");
             offVals   = it.getLongArrayExtra("offVals");
@@ -108,7 +108,7 @@ public final class OverlayService extends Service {
         col.setBackgroundColor(0xB00A0A0B);
         col.setPadding(dp(8), dp(6), dp(8), dp(6));
 
-        int n = titles != null ? titles.length : 0;
+        int n = indices != null ? indices.length : 0;
         for (int i = 0; i < n; i++) {
             final int idx = indices[i];
             final long on = onVals[i], off = offVals[i];
@@ -116,8 +116,10 @@ public final class OverlayService extends Service {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setPadding(0, dp(4), 0, dp(4));
-            Button onB = pillBtn(titles[i] + " on", 0x99808080, idx, ty, on);
-            Button offB = pillBtn(titles[i] + " off", 0x99484848, idx, ty, off);
+            // Подписи приходят уже короткими (LED ON / GPS OFF / ATTI) — в две колонки панели
+            // длинный текст не влезал и обрезался.
+            Button onB = pillBtn(onLabels[i], 0x99808080, idx, ty, on);
+            Button offB = pillBtn(offLabels[i], 0x99484848, idx, ty, off);
             LinearLayout.LayoutParams lo = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             lo.rightMargin = dp(4);
             LinearLayout.LayoutParams lf = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
@@ -132,57 +134,45 @@ public final class OverlayService extends Service {
         foot.setOrientation(LinearLayout.HORIZONTAL);
         foot.setPadding(0, dp(6), 0, 0);
 
-        Button close = new Button(this);
-        close.setText("Свернуть");
-        close.setAllCaps(false);
-        close.setSingleLine(true);
-        close.setTextSize(12);
-        close.setMinWidth(0); close.setMinimumWidth(0);
-        close.setPadding(dp(2), dp(6), dp(2), dp(6));
-        close.setTextColor(0xFF2E9BFF);
-        close.setBackgroundColor(0x00000000);
-        close.setOnClickListener(v -> togglePanel());
-        foot.addView(close, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        Button app = new Button(this);
-        app.setText("Открыть");
-        app.setAllCaps(false);
-        app.setSingleLine(true);
-        app.setTextSize(12);
-        app.setMinWidth(0); app.setMinimumWidth(0);
-        app.setPadding(dp(2), dp(6), dp(2), dp(6));
-        app.setTextColor(0xFF2E9BFF);
-        app.setBackgroundColor(0x00000000);
-        app.setOnClickListener(v -> {
+        // Три кнопки в трёх равных колонках — самый тесный ряд панели, поэтому подписи
+        // максимально короткие и с автоужатием.
+        foot.addView(footBtn("Скрыть", 0xFF2E9BFF, v -> togglePanel()),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        foot.addView(footBtn("Открыть", 0xFF2E9BFF, v -> {
             togglePanel();
             try {
                 Intent i = new Intent(this, MainActivity.class);
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
                 startActivity(i);
             } catch (Throwable t) { Logger.w("[overlay] open app: " + t); }
-        });
-        foot.addView(app, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        Button remove = new Button(this);
-        remove.setText("Закрыть");
-        remove.setAllCaps(false);
-        remove.setSingleLine(true);
-        remove.setTextSize(12);
-        remove.setMinWidth(0); remove.setMinimumWidth(0);
-        remove.setPadding(dp(2), dp(6), dp(2), dp(6));
-        remove.setTextColor(0xFFFF453A);
-        remove.setBackgroundColor(0x00000000);
-        remove.setOnClickListener(v -> { togglePanel(); stopSelf(); });
-        foot.addView(remove, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        foot.addView(footBtn("Выход", 0xFFFF453A, v -> { togglePanel(); stopSelf(); }),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         col.addView(foot, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        WindowManager.LayoutParams p = olp(dp(280), WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams p = olp(dp(300), WindowManager.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.LEFT);
         p.x = dp(54); p.y = dp(84);
         panel = col;
         wm.addView(col, p);
+    }
+
+    /** Плоская кнопка нижнего ряда: без фона, цветной текст, автоужатие. */
+    private Button footBtn(String text, int color, View.OnClickListener l) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setSingleLine(true);
+        b.setTextSize(12);
+        b.setMinWidth(0); b.setMinimumWidth(0);
+        b.setPadding(dp(2), dp(6), dp(2), dp(6));
+        b.setTextColor(color);
+        b.setBackgroundColor(0x00000000);
+        b.setOnClickListener(l);
+        autoSize(b, 9, 12);
+        return b;
     }
 
     /** Filled rounded pill button (app style), white text; fires a write-only 40008 inject. */
@@ -196,7 +186,10 @@ public final class OverlayService extends Service {
         b.setBackground(pill(fill));
         b.setMinHeight(0);
         b.setMinimumHeight(0);
-        b.setPadding(dp(10), dp(10), dp(10), dp(10));
+        // Узкий горизонтальный padding: колонка ~140dp, и по 10dp с каждой стороны съедали
+        // столько, что подпись обрезалась. Вертикальный оставляем — таргет под палец.
+        b.setPadding(dp(4), dp(10), dp(4), dp(10));
+        autoSize(b, 11, 15);
         b.setOnClickListener(v -> {
             Logger.i("[overlay] tap '" + text + "' idx=" + idx + " val=" + val + " type=" + type + " -> 40008");
             new Thread(() -> {
@@ -206,6 +199,18 @@ public final class OverlayService extends Service {
             }).start();
         });
         return b;
+    }
+
+    /**
+     * Дать тексту ужаться, а не обрезаться. На API 26+ (пульт — 30) авторазмер решает это
+     * штатно; на более старых просто остаётся фиксированный размер.
+     */
+    private static void autoSize(Button b, int minSp, int maxSp) {
+        if (Build.VERSION.SDK_INT < 26) return;
+        try {
+            b.setAutoSizeTextTypeUniformWithConfiguration(minSp, maxSp, 1,
+                    android.util.TypedValue.COMPLEX_UNIT_SP);
+        } catch (Throwable ignore) { /* нестандартная прошивка — оставляем как есть */ }
     }
 
     private android.graphics.drawable.GradientDrawable pill(int fill) {

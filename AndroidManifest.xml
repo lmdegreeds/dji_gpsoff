@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.djiquick"
-    android:versionCode="1"
-    android:versionName="0.1">
+    android:versionCode="17"
+    android:versionName="0.17">
+
+    <!-- ПРАВИЛО ВЕРСИЙ: versionName = 0.NN, versionCode = NN. Бампать КАЖДЫЙ деплой.
+         Пока манифест стоял на 0.1, по телеметрии нельзя было отличить старую сборку
+         от новой — и «поиск ничего не находит» списывали на дрон, а не на устаревший APK. -->
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="30" />
 
@@ -13,6 +17,8 @@
     <!-- плавающее меню поверх DJI Fly -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- обновление из релизов GitHub: скачиваем APK и ставим через PackageInstaller -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- видимость пакетов Android 11: резолвим DJI Fly и открываем её «О приложении» -->
     <queries>
@@ -38,8 +44,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".AboutActivity"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|uiMode|density" />
         <service
             android:name=".OverlayService"
+            android:exported="false" />
+        <!-- статус сессии PackageInstaller при самообновлении -->
+        <receiver
+            android:name=".InstallReceiver"
             android:exported="false" />
     </application>
 </manifest>

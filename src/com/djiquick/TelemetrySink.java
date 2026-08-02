@@ -14,4 +14,12 @@ public interface TelemetrySink {
                           String friendly, JSONObject quickIds, String appVersion);
     /** Retry anything queued from an earlier offline connection. */
     void flush();
+
+    /**
+     * Разовый пакет диагностики, отправленный пользователем вручную со страницы «О программе».
+     * Мимо дедупликации и очереди: одна попытка, без ретраев, без сохранения — если не ушло,
+     * пользователь копирует текст и присылает сам.
+     * БЛОКИРУЮЩИЙ — вызывать не из main-треда. true только на 2xx.
+     */
+    boolean sendDiagnostics(JSONObject bundle);
 }

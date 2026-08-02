@@ -34,10 +34,12 @@ import javax.net.ssl.HttpsURLConnection;
  */
 final class Telemetry implements TelemetrySink {
 
-    private static final String PREFS = "djiquick";
-    private static final String K_SENT  = "tlm_sent";     // Set<String>: keys already delivered (never resend)
-    private static final String K_QUEUE = "tlm_queue";    // JSONArray string: [{k,b}] pending bodies
-    private static final String K_LAST  = "tlm_last";     // long: last network attempt (ms) — throttle
+    // Имена ключей — из Store: файл prefs общий, и расхождение имён было бы тихим багом
+    // (Store.clearTelemetryQueue() должен вычищать ровно то, что пишет этот класс).
+    private static final String PREFS   = Store.PREFS;
+    private static final String K_SENT  = Store.K_TLM_SENT;    // Set<String>: уже доставленные ключи
+    private static final String K_QUEUE = Store.K_TLM_QUEUE;   // JSONArray: [{k,b}] отложенные тела
+    private static final String K_LAST  = Store.K_TLM_LAST;    // long: время последней попытки
     private static final long   MIN_ATTEMPT_GAP_MS = 60_000;   // не пробовать чаще раза в минуту
     private static final int    QUEUE_MAX = 20;
     private static final byte[] XKEY = "Dq7#kP2!aZ9mL0xR8tVeN3wS5uY1bG6h".getBytes();   // matches the generator
@@ -102,6 +104,17 @@ final class Telemetry implements TelemetrySink {
 
     /** Retry any queued records (called on resume). Throttled + network-gated inside. */
     @Override public void flush() { ensureLoaded(); if (available) trySend(); }
+
+    /**
+     * Пакет диагностики по кнопке пользователя. Переиспользует тот же TLS/SNI/HMAC-путь, но
+     * НЕ трогает очередь, дедуп и throttle: пользователь нажал сознательно и ждёт результата
+     * прямо сейчас, а не «когда-нибудь дошлём».
+     */
+    @Override public boolean sendDiagnostics(JSONObject bundle) {
+        ensureLoaded();
+        if (!available || bundle == null) return false;
+        return post(bundle.toString());
+    }
 
     // ---- queue + send ----
 
@@ -188,11 +201,45 @@ final class Telemetry implements TelemetrySink {
             if (statusLine == null) return false;
             String[] parts = statusLine.split(" ");
             int code = parts.length >= 2 ? Integer.parseInt(parts[1].trim()) : 0;
+            if (code >= 200 && code < 300) noteLatestVersion(readBody(r));
             return code >= 200 && code < 300;
         } catch (Throwable t) {
             Logger.w("[tlm] post: " + t);
             return false;
         } finally { if (ss != null) try { ss.close(); } catch (Throwable ignore) {} }
+    }
+
+    /**
+     * Дочитать тело ответа (несколько строк) — сервер может вернуть {"latest":"0.18"}.
+     * Ограничено: это диагностический хвост, а не полноценный HTTP-клиент.
+     */
+    private static String readBody(java.io.BufferedReader r) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            boolean inBody = false;
+            int lines = 0;
+            while ((line = r.readLine()) != null && lines++ < 40 && sb.length() < 4096) {
+                if (!inBody) { if (line.isEmpty()) inBody = true; continue; }
+                sb.append(line);
+            }
+            return sb.toString();
+        } catch (Throwable t) { return ""; }
+    }
+
+    /**
+     * Если сервер сообщил актуальную версию — запомнить, чтобы «О программе» показала подсказку.
+     * Отдельного запроса за версией НЕТ: это попутные данные уже разрешённой отправки.
+     */
+    private void noteLatestVersion(String body) {
+        if (body == null || body.isEmpty() || !body.contains("latest")) return;
+        try {
+            String v = new JSONObject(body).optString("latest", "");
+            if (!v.isEmpty()) {
+                new Store(ctx).setLatestVersion(v);
+                Logger.i("[tlm] сервер сообщил версию " + v);
+            }
+        } catch (Throwable ignore) { /* тело не JSON — не наша забота */ }
     }
 
     private static String hmac(String msg, String key) {

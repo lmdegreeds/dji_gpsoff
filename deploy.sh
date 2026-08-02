@@ -34,5 +34,14 @@ python "$PROJ/tools/rc2sh.py" "pm install -r -g /sdcard/QuickToggle.apk"
 python "$PROJ/tools/rc2sh.py" "appops set com.djiquick SYSTEM_ALERT_WINDOW allow" || true
 
 echo "[3/3] verify"
-python "$PROJ/tools/rc2sh.py" "dumpsys package com.djiquick | grep versionName"
+# Сверяем версию НА ПУЛЬТЕ с версией в манифесте. Молчаливо установившаяся старая сборка —
+# именно та ловушка, из-за которой «поиск ничего не находит» списывали на дрон (см. README).
+WANT="$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' "$PROJ/AndroidManifest.xml" | head -1)"
+GOT="$(python "$PROJ/tools/rc2sh.py" "dumpsys package com.djiquick | grep versionName" \
+       | sed -n 's/.*versionName=\([^ ]*\).*/\1/p' | head -1)"
+echo "  манифест: $WANT   на пульте: ${GOT:-?}"
+if [ -n "$GOT" ] && [ "$GOT" != "$WANT" ]; then
+  echo "!! ВНИМАНИЕ: на пульте осталась версия $GOT, а собрана $WANT — установка не применилась."
+  exit 1
+fi
 echo "DONE. Launch on the RC, or: python tools/rc2sh.py \"am start -n com.djiquick/.MainActivity\""
