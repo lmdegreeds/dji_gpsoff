@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.djiquick"
-    android:versionCode="17"
-    android:versionName="0.17">
+    android:versionCode="18"
+    android:versionName="0.18">
 
     <!-- ПРАВИЛО ВЕРСИЙ: versionName = 0.NN, versionCode = NN. Бампать КАЖДЫЙ деплой.
          Пока манифест стоял на 0.1, по телеметрии нельзя было отличить старую сборку

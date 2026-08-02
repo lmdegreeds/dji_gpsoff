@@ -161,16 +161,23 @@ public final class MainActivity extends Activity implements Detector.Listener {
         header.addView(titleCol, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        // «?» доступна с ЛЮБОГО шага — в том числе с провалившегося результата, когда она и нужна
+        // Вход в диагностику доступен с ЛЮБОГО шага — в том числе с провалившегося результата,
+        // когда он и нужен. Подписан словами и на видимой плашке: одинокий прозрачный «?» в углу
+        // ландшафтного экрана пользователи просто не находили.
         Button help = new Button(this);
-        help.setText("?");
+        help.setText("?  О программе");
         help.setAllCaps(false);
         help.setTextColor(ACCENT);
-        help.setTextSize(20);
-        help.setBackgroundColor(0x00000000);
+        help.setTextSize(15);
+        help.setBackgroundColor(ROW_BG);
+        help.setPadding(dp(12), 0, dp(12), 0);
         help.setOnClickListener(v -> openAbout());
-        header.addView(help, new LinearLayout.LayoutParams(dp(56), dp(56)));
-        root.addView(header);
+        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(44));
+        hp.rightMargin = dp(12);
+        header.addView(help, hp);
+        root.addView(header, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         ScrollView scroll = new ScrollView(this);
         body = new LinearLayout(this);
@@ -272,6 +279,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
             note("DJI Fly не установлена — шаг можно пропустить.");
         }
         action("DJI Fly остановлена — далее", GREEN, v -> { step = STEP_CONNECT; render(); });
+        action("О программе · версия, обновление, диагностика", TXT_SUB, v -> openAbout());
     }
 
     /** Шаг 2 — включить дрон и подключиться. */
@@ -329,7 +337,8 @@ public final class MainActivity extends Activity implements Detector.Listener {
         for (QuickParam q : params) if (q.idx >= 0) any = true;
         if (any) action("Сохранить и открыть меню", GREEN, v -> saveAndHub());
         action("Повторить определение", ACCENT, v -> { step = STEP_CONNECT; render(); });
-        if (!any) action("Не получилось — открыть диагностику", TXT_SUB, v -> openAbout());
+        action(any ? "О программе · версия, обновление, диагностика"
+                   : "Не получилось — открыть диагностику", TXT_SUB, v -> openAbout());
     }
 
     /** Строка ручного ввода индекса + кнопка проверки по имени. */
@@ -413,6 +422,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
                 canOverlay ? GREEN : TXT_SUB);
         action("Показать плавающее меню (overlay)", ACCENT, v -> { if (startOverlay(true)) toast("Overlay поднят"); });
         action("Перенастроить (мастер заново)", TXT_SUB, v -> { stopOverlay(); step = STEP_STOP; render(); });
+        action("О программе · версия, обновление, диагностика", TXT_SUB, v -> openAbout());
     }
 
     /** Пара кнопок для одного параметра (слепая запись на 40008, без reader и без overlay). */
