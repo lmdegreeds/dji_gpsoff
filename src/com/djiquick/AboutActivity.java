@@ -142,11 +142,24 @@ public final class AboutActivity extends Activity {
 
         // ---- о программе ----
         Ui.caption(this, body, "О ПРОГРАММЕ");
-        Ui.note(this, body, "Быстрые тумблеры параметров полётного контроллера для пульта DJI RC 2. "
-                + "Идеи по гигиене DUML-кадров (монотонный номер запроса, проверка длины кадра, сверка "
-                + "маршрутизации ответа) заимствованы концептуально из проекта FreeFCC (AGPL-3.0); "
-                + "кода FreeFCC в этой сборке нет.");
+        Ui.note(this, body, "Быстрые тумблеры параметров полётного контроллера для пульта DJI RC 2.");
+        Ui.statusLine(this, body, Updater.PROJECT_URL, ACCENT);
+        Ui.action(this, body, "Открыть страницу проекта", ACCENT, v -> openProject());
+        Ui.action(this, body, "Скопировать ссылку", TXT_SUB, v -> copy("ссылка", Updater.PROJECT_URL));
         Ui.action(this, body, "Назад", TXT_SUB, v -> finish());
+    }
+
+    /** Открыть репозиторий в браузере. На пульте браузера может не быть — тогда остаётся копия ссылки. */
+    private void openProject() {
+        try {
+            android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(Updater.PROJECT_URL));
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Throwable t) {
+            Logger.w("[about] браузер недоступен: " + t);
+            toast("Браузера нет — нажми «Скопировать ссылку»");
+        }
     }
 
     // ---- обновление из релизов GitHub ----

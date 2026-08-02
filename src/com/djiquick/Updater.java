@@ -27,6 +27,8 @@ import java.net.URL;
 public final class Updater {
 
     private static final String OWNER_REPO = "lmdegreeds/dji_gpsoff";
+    /** Страница проекта — показывается в «О программе»; держим рядом с OWNER_REPO, чтобы не разошлись. */
+    public static final String PROJECT_URL = "https://github.com/" + OWNER_REPO;
     private static final String API_LATEST =
             "https://api.github.com/repos/" + OWNER_REPO + "/releases/latest";
     private static final String WEB_LATEST =
