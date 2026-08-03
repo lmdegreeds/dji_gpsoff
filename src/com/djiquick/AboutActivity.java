@@ -126,6 +126,22 @@ public final class AboutActivity extends Activity {
             }
         }
 
+        // ---- пульт ----
+        Ui.caption(this, body, "ПУЛЬТ");
+        String rc = board.optString("rc_model", "");
+        Ui.statusLine(this, body, "Модель: " + Build.DEVICE
+                + (rc.isEmpty() ? "" : " · " + rc) + "  (" + Build.MODEL + ")", TXT);
+        String tr = board.optString("transport", "");
+        Ui.statusLine(this, body, "Транспорт: " + (tr.isEmpty() ? "не определён" : tr), TXT);
+        String lis = board.optString("listeners", "");
+        Ui.note(this, body, lis.isEmpty()
+                ? "Список слушающих портов появится после определения дрона."
+                : lis);
+        Ui.note(this, body, "Приложение проверено только на DJI RC 2. На другом пульте оно само "
+                + "перебирает варианты подключения; если ничего не подошло — пришли диагностику, "
+                + "по списку портов выше станет понятно, что добавить.");
+        Ui.action(this, body, "Выбрать способ подключения вручную", TXT_SUB, v -> transportPicker());
+
         // ---- диагностика ----
         Ui.caption(this, body, "ДИАГНОСТИКА");
         consentSwitch();
@@ -160,6 +176,35 @@ public final class AboutActivity extends Activity {
             Logger.w("[about] браузер недоступен: " + t);
             toast("Браузера нет — нажми «Скопировать ссылку»");
         }
+    }
+
+    /**
+     * Ручной выбор способа подключения — запасной путь, когда автоподбор ошибся.
+     *
+     * Здесь мы только ЗАПОМИНАЕМ вариант, а проверяем его на следующем определении дрона.
+     * Пробовать прямо отсюда нельзя: живой движок держит MainActivity, и второй читатель
+     * на том же порту устроил бы драку за канал.
+     */
+    private void transportPicker() {
+        String current = new Store(this).transport(Store.rcKey(""));
+        body.removeAllViews();
+        Ui.caption(this, body, "СПОСОБ ПОДКЛЮЧЕНИЯ");
+        Ui.note(this, body, "Обычно подбирается сам. Меняй, только если дрон не определяется: "
+                + "выбери вариант и запусти определение заново (в приложении — «Перенастроить»).");
+        for (Transport t : Transport.candidates()) {
+            boolean sel = t.name.equals(current);
+            Ui.action(this, body, (sel ? "● " : "○ ") + t.name, sel ? GREEN : ACCENT, v -> {
+                new Store(this).saveTransport("", t.name);
+                toast("Выбрано: " + t.name + ". Запусти определение заново.");
+                render();
+            });
+        }
+        Ui.action(this, body, "Сбросить (подбирать автоматически)", TXT_SUB, v -> {
+            new Store(this).forgetTransport("");
+            toast("Сброшено — подберётся автоматически");
+            render();
+        });
+        Ui.action(this, body, "Назад", TXT_SUB, v -> render());
     }
 
     // ---- обновление из релизов GitHub ----

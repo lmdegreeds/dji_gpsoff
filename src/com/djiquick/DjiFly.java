@@ -17,8 +17,16 @@ import android.provider.Settings;
  */
 public final class DjiFly {
 
-    /** Any DJI Fly version, newest first. */
-    public static final String[] CANDIDATES = { "dji.go.v6", "dji.go.v5" };
+    /**
+     * Приложения DJI, занимающие канал к дрону, — от новых к старым.
+     * v6/v5 — DJI Fly (на RC 2 активна v6, v5 стоит отключённой), v4 — DJI GO 4 на старых
+     * пультах, pilot — DJI Pilot на enterprise. Без последних двух на пульте, где стоит не Fly,
+     * шаг «Остановить DJI Fly» просто не покажет кнопку.
+     * Каждый пакет обязан быть и в &lt;queries&gt; манифеста, иначе под Android 11 он невидим.
+     */
+    public static final String[] CANDIDATES = {
+            "dji.go.v6", "dji.go.v5", "dji.go.v4", "com.dji.industry.pilot"
+    };
 
     private DjiFly() {}
 

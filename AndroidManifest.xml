@@ -24,6 +24,8 @@
     <queries>
         <package android:name="dji.go.v6" />
         <package android:name="dji.go.v5" />
+        <package android:name="dji.go.v4" />
+        <package android:name="com.dji.industry.pilot" />
         <package android:name="com.dpad.fuli" />
     </queries>
 

@@ -21,7 +21,8 @@ import java.util.Set;
  * ЛЮБОЙ кандидат подтверждается живым get_info: имя с борта должно совпасть с ожидаемым.
  * Без этого на чужой прошивке тот же номер означает совсем другой параметр.
  *
- * Читает на 40007 → работает только с остановленной DJI Fly.
+ * Читает поток с пульта → работает только с остановленной DJI Fly.
+ * Если транспорт по умолчанию молчит, стадии 1 предшествует подбор (Duml.probe).
  */
 public final class Detector {
 
@@ -42,6 +43,8 @@ public final class Detector {
     private final ModelDb db;
     private final QuickParam[] params;
     private final Listener listener;
+    private final Store store;
+    private Listeners netInv;
 
     private volatile boolean cancelled = false;
     private volatile boolean running = false;
@@ -51,9 +54,13 @@ public final class Detector {
     private boolean modelWeak = false;
     private final StringBuilder trace = new StringBuilder();
 
-    public Detector(Duml duml, ModelDb db, QuickParam[] params, Listener listener) {
-        this.duml = duml; this.db = db; this.params = params; this.listener = listener;
+    public Detector(Duml duml, ModelDb db, QuickParam[] params, Store store, Listener listener) {
+        this.duml = duml; this.db = db; this.params = params;
+        this.store = store; this.listener = listener;
     }
+
+    /** Что слушало на пульте в момент детекта — уходит в диагностику. null, пока детект не шёл. */
+    public Listeners listeners() { return netInv; }
 
     public boolean isRunning() { return running; }
     public void cancel() { cancelled = true; }
@@ -76,6 +83,9 @@ public final class Detector {
 
     private void work() {
         try {
+            netInv = Listeners.scan();          // пассивно, ни одного сокета не открывает
+            log("слушают: " + netInv.portsLine());
+            applySavedTransport();
             duml.start();
 
             // 1) отпечаток прошивки
@@ -86,9 +96,11 @@ public final class Detector {
                 if (ti != null) break;
                 sleep(400);
             }
+            // Транспорт не отозвался — возможно, это не наш пульт. Перебрать варианты.
+            if (ti == null && !cancelled) ti = probeTransport();
             if (cancelled) { finish("Отменено", true); return; }
             if (ti == null) {
-                log("E0 нет ответа");
+                log("E0 нет ответа ни на одном транспорте");
                 finish("Нет связи с бортом. Проверь, что дрон включён и DJI Fly остановлена.", true);
                 return;
             }
@@ -174,6 +186,53 @@ public final class Detector {
             duml.stop();
             running = false;
         }
+    }
+
+    // ---- транспорт ----
+
+    /** Поставить транспорт, ранее подтверждённый на этом пульте. Иначе останется тот, что по умолчанию. */
+    private void applySavedTransport() {
+        if (store == null) return;
+        Transport saved = Transport.byName(store.transport(Store.rcKey(duml.rcModel())));
+        if (saved != null) {
+            duml.setTransport(saved);
+            log("транспорт из кеша: " + saved.name);
+        }
+    }
+
+    /**
+     * Перебрать варианты транспорта. Возвращает ответ 0xE0 при успехе, иначе null.
+     *
+     * Сюда попадаем только когда транспорт по умолчанию (или из кеша) молчит — на rc331 этого
+     * не происходит, поэтому лишних проб там нет. Кеш при неудаче сбрасывается: прошивка пульта
+     * могла смениться.
+     */
+    private long[] probeTransport() {
+        phase("Подбор транспорта…");
+        log("транспорт " + duml.transport().name + " молчит — перебираю варианты");
+        Transport found = duml.probe(netInv, new Duml.ProbeCb() {
+            @Override public void trying(Transport t, int n, int total) {
+                phase("Подбор транспорта " + n + "/" + total + ": " + t.name + "…");
+                log("проба " + t.name);
+            }
+            @Override public boolean cancelled() { return cancelled; }
+        });
+        if (found == null) {
+            log("подбор: ни один вариант не ответил");
+            if (store != null) store.forgetTransport(duml.rcModel());
+            return null;
+        }
+        log("подбор: подошёл " + found.name);
+        // rcModel мог появиться только сейчас — сохраняем под ключом с ним.
+        if (store != null) store.saveTransport(duml.rcModel(), found.name);
+        // Повторный запрос: движок уже поднят на найденном транспорте. С ретраями — один
+        // потерянный ответ не должен превратить удачный подбор в «нет связи».
+        for (int a = 0; a < 3 && !cancelled; a++) {
+            long[] ti = duml.tableInfo(0, 1200);
+            if (ti != null) return ti;
+            sleep(250);
+        }
+        return null;
     }
 
     /** Прочитать имя по индексу и раздать его ВСЕМ ещё не найденным параметрам. */

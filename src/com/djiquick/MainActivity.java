@@ -39,10 +39,12 @@ import static com.djiquick.Ui.TXT_SUB;
  *   1) остановить DJI Fly — приложение открывает её экран «О приложении»;
  *   2) включить дрон и подключиться;
  *   3) Detector находит индексы параметров и проверяет каждый живьём по имени;
- *   4) поднимается overlay-меню; запись слепая на 40008 и сосуществует с Fly.
+ *   4) поднимается overlay-меню; запись слепая, без ридера, и сосуществует с Fly.
  * При повторном запуске с тем же дроном мастер пропускается.
  *
- * Детект читает на 40007 → ТОЛЬКО с остановленной DJI Fly. Оверлей не читает вовсе.
+ * Детект читает поток с пульта → ТОЛЬКО с остановленной DJI Fly. Оверлей не читает вовсе.
+ * Порты и «диалект» кадра задаёт Transport: на rc331 это 40008/40007, на других пультах
+ * подбирается автоматически (см. Duml.probe).
  */
 public final class MainActivity extends Activity implements Detector.Listener {
 
@@ -210,6 +212,11 @@ public final class MainActivity extends Activity implements Detector.Listener {
             o.put("picked", detector != null && detector.model() != null ? detector.model().code : "");
             o.put("label", modelLabel != null ? modelLabel : "");
             o.put("link", duml.linkStats());   // эхо seq и маршрутизация ответов — измерение, см. Duml
+            // Пульт и транспорт: по этим полям однажды станет понятно, как поддержать rm310/rm330.
+            o.put("rc_device", android.os.Build.DEVICE);
+            o.put("transport", duml.transport().name);
+            o.put("listeners", detector != null && detector.listeners() != null
+                    ? detector.listeners().report() : "");
             JSONObject ids = new JSONObject();
             for (QuickParam q : params) {
                 JSONObject one = new JSONObject();
@@ -387,7 +394,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
             String name = null;
             try {
                 duml.start();
-                for (int a = 0; a < 12 && !duml.isUp(); a++) sleep(200);   // дождаться reader 40007
+                for (int a = 0; a < 12 && !duml.isUp(); a++) sleep(200);   // дождаться ридера
                 for (int a = 0; a < 3 && name == null; a++) {
                     byte[] info = duml.getInfoRaw(0, idx, 1100);
                     if (info != null) { name = Duml.nameFromInfo(info); break; }
@@ -425,7 +432,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
         action("О программе · версия, обновление, диагностика", TXT_SUB, v -> openAbout());
     }
 
-    /** Пара кнопок для одного параметра (слепая запись на 40008, без reader и без overlay). */
+    /** Пара кнопок для одного параметра (слепая запись, без reader и без overlay). */
     private void toggleRow(QuickParam q) {
         caption(q.title.toUpperCase() + " · " + q.key + " (idx " + q.idx + ")");
         LinearLayout row = new LinearLayout(this);
@@ -443,7 +450,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
         body.addView(row, rowLp);
     }
 
-    /** Слепая запись значения параметра на 40008 в фоне (сосуществует с DJI Fly). */
+    /** Слепая запись значения параметра в фоне (сосуществует с DJI Fly). */
     private void writeToggle(QuickParam q, boolean on) {
         final long val = on ? q.onVal : q.offVal;
         final String label = on ? q.onLabel : q.offLabel;
@@ -459,7 +466,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
         if (detector != null && detector.isRunning()) return;
         if (db == null) db = ModelDb.load(this);
         detectError = null; detectPhase = "Подключение…";
-        detector = new Detector(duml, db, params, this);
+        detector = new Detector(duml, db, params, store, this);
         step = STEP_DETECT; render();
         detector.start();
     }
@@ -526,6 +533,9 @@ public final class MainActivity extends Activity implements Detector.Listener {
         i.putExtra("types", types);
         i.putExtra("onLabels", onLabels);
         i.putExtra("offLabels", offLabels);
+        // Оверлей поднимается отдельным сервисом и подбора не проходит — отдаём ему найденный
+        // транспорт явно, иначе на не-rc331 пульте он писал бы в дефолтный порт.
+        i.putExtra("transport", duml.transport().name);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
         return true;
     }
@@ -563,7 +573,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
     @Override
     protected void onPause() {
         super.onPause();
-        if (detector != null) detector.cancel();   // не держим reader 40007 в фоне
+        if (detector != null) detector.cancel();   // не держим ридер в фоне
         duml.stop();
     }
 

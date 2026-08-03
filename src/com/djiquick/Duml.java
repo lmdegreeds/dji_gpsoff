@@ -24,6 +24,8 @@ import java.util.List;
 public final class Duml {
 
     public static final int SET = 0x03, APP = 0x02, FC = 0x03;
+    /** Адрес пульта на шине DUML: своё кодовое имя он вещает кадром 0d/00/81. */
+    public static final int RC = 0x0d;
     public static final int GET_TABLE = 0xE0, GET_INFO = 0xE1, READ_VAL = 0xE2, WRITE_VAL = 0xE3;
 
     // Collected replies, tagged with a monotonic seq. request() snapshots the current seq high-water
@@ -61,6 +63,18 @@ public final class Duml {
     private volatile boolean running = false;
     private volatile long lastRx = 0;
     private volatile Socket rsock;
+
+    /** Текущий вариант транспорта. По умолчанию — проверенный на rc331. */
+    private volatile Transport tr = Transport.defaultTransport();
+
+    public Transport transport() { return tr; }
+
+    /** Сменить транспорт. Только на остановленном движке: порты читает reader-тред. */
+    public void setTransport(Transport t) {
+        if (t == null || running) return;
+        tr = t;
+        Logger.i("[duml] транспорт: " + t);
+    }
 
     // Smoothed round-trip time of successful requests. Drives adaptiveTimeout() so waits grow when
     // the 40007 downstream is congested (e.g. DJI Fly mirroring FPV) and shrink when it's calm.
@@ -100,7 +114,7 @@ public final class Duml {
             rsock = s;
             try {
                 s.setTcpNoDelay(true);
-                s.connect(new InetSocketAddress("127.0.0.1", 40007), 2000);
+                s.connect(new InetSocketAddress("127.0.0.1", tr.readPort), 2000);
                 s.setSoTimeout(4000);
                 up = true;
                 InputStream in = s.getInputStream();
@@ -191,18 +205,18 @@ public final class Duml {
         rttEwmaMs = Math.max(40, Math.min(e, 2000));
     }
 
-    // Send a request on 40008, wait for the reply matching (cmdSet, cmdId, index). Returns payload or null.
+    // Инжект на порт текущего транспорта, ожидание ответа по (cmdSet, cmdId, index). null — нет ответа.
     // Single-shot: writes rely on this NOT retrying. Reads go through requestRead() for retries.
     public byte[] request(int cmdSet, int cmdId, byte[] payload, int wantIndex, int timeoutMs) {
         if (!running) return null;
         long mark;
         synchronized (ready) { mark = seqCounter; }   // only replies newer than this can be ours
         final int mySeq = seqGen.getAndIncrement() & 0xFFFF;
-        byte[] pkt = build(cmdSet, cmdId, payload, mySeq);
+        byte[] pkt = tr.wrap(build(cmdSet, cmdId, payload, mySeq));
         Socket s = new Socket();
         try {
             s.setTcpNoDelay(true);
-            s.connect(new InetSocketAddress("127.0.0.1", 40008), 1500);
+            s.connect(new InetSocketAddress("127.0.0.1", tr.injectPort), 1500);
             OutputStream out = s.getOutputStream();
             out.write(pkt); out.flush();
         } catch (Throwable e) {
@@ -330,7 +344,12 @@ public final class Duml {
                     if (codeSeen.put(cl, 1) == null)
                         Logger.i(String.format("[duml] codename %s (src=%02x set=%02x id=%02x)", cl, src, set, id));
                 }
-                if (cl.startsWith("rc")) rcModel = cl; else acModel = cl;
+                // Раскладываем по АДРЕСУ отправителя, а не по префиксу имени. Пульт вещает своё
+                // кодовое имя из src=0x0d (кадр 0d/00/81); борт и батарея — из других адресов.
+                // Раньше проверялось `cl.startsWith("rc")`, и на пультах серии rm (RC Pro rm310,
+                // RC rm330) их имя уходило в acModel, затирая реальную модель дрона — а acModel
+                // ещё и селектор в ModelDb.pick.
+                if (src == RC) rcModel = cl; else acModel = cl;
             }
         }
     }
@@ -383,21 +402,25 @@ public final class Duml {
         return p;
     }
 
-    private static byte[] build(int cmdSet, int cmdId, byte[] payload, int seq) {
-        return frame(cmdSet, cmdId, payload, FC, APP, seq);
+    /** Кадр с src и cmd_type текущего транспорта (обёртку, если нужна, вешает вызывающий). */
+    private byte[] build(int cmdSet, int cmdId, byte[] payload, int seq) {
+        return frame(cmdSet, cmdId, payload, FC, tr.src, tr.cmdType, seq);
     }
-    // Full DUML v1 frame with explicit dst/src/seq. src=0x02 (APP) on our 40008 inject path.
+    // Full DUML v1 frame with explicit dst/src/cmd_type/seq. Значения src и cmd_type задаёт
+    // Transport: 0x02/0x40 на нашем пути 40008, 0x82/0x20 на пути FCC-профиля (40009).
     // CRC8 init 0x77 + CRC16 init 0x3692 (see tables below).
-    private static byte[] frame(int cmdSet, int cmdId, byte[] payload, int dst, int src, int seq) {
+    private static byte[] frame(int cmdSet, int cmdId, byte[] payload, int dst, int src,
+                                int cmdType, int seq) {
         int len = 13 + payload.length;
         // Длина кадра — 10-битное поле (b[1] + 2 бита b[2]): всё от 1024 молча заворачивается,
-        // и борт роняет кадр без единой диагностики. Наши payload'ы ≤10 байт — это ассерт.
+        // и борт роняет кадр без единой диагностики. Проверяем ДО внешней обёртки: её 8 байт
+        // к полю длины DUML отношения не имеют. Наши payload'ы ≤10 байт — это ассерт.
         if (len > 1023) throw new IllegalArgumentException("duml frame " + len + " > 1023");
         byte[] b = new byte[len];
         b[0] = 0x55; b[1] = (byte) len; b[2] = (byte) ((1 << 2) | ((len >> 8) & 3));
         b[3] = (byte) crc8(b, 0, 3);
         b[4] = (byte) src; b[5] = (byte) dst; b[6] = (byte) seq; b[7] = (byte) (seq >> 8);
-        b[8] = 0x40; b[9] = (byte) cmdSet; b[10] = (byte) cmdId;
+        b[8] = (byte) cmdType; b[9] = (byte) cmdSet; b[10] = (byte) cmdId;
         System.arraycopy(payload, 0, b, 11, payload.length);
         int c = crc16(b, 0, len - 2);
         b[len - 2] = (byte) c; b[len - 1] = (byte) (c >> 8);
@@ -408,27 +431,31 @@ public final class Duml {
     private int seqCoexist = 0x0100;
 
     /**
-     * "Coexist with DJI Fly" write: fire-and-forget write_value (0xE3) on the 40008 inject socket.
-     * One-shot connect→write→close, NO reader, NO readback. This is the write half of our normal path
-     * (40008 upstream inject, src=0x02) but WITHOUT opening the persistent 40007 reader — and it's the
-     * 40007 reader that churns DJI Fly's video mirror (§4), not the inject. So a brief write here should
-     * not disturb Fly. Uses 40008, NOT 40009: 40009 only routes injects from a privileged uid — from our
-     * untrusted app the identical frame on 40009 is silently dropped, while 40008 routes fine
-     * (confirmed on LitoX1: forearm_led_ctrl idx 23 toggles via 40008).
+     * "Coexist with DJI Fly" write: fire-and-forget write_value (0xE3) на inject-порт транспорта.
+     * One-shot connect→write→close, NO reader, NO readback. Это половина обычного пути, но БЕЗ
+     * постоянного ридера — а Fly ломает именно ридер (зеркало FPV-видео), а не инжект. Поэтому
+     * короткая запись здесь ей не мешает.
+     *
+     * На rc331 транспорт по умолчанию — 40008, НЕ 40009: 40009 принимает соединение от любого uid,
+     * но кадры непривилегированного приложения молча выбрасывает (проверено на живом железе),
+     * тогда как 40008 роутит нормально (forearm_led_ctrl idx 23 переключается через 40008).
+     * Гипотеза про uid не доказана — вариант с src=0x82/type=0x20 на 40009 есть среди кандидатов
+     * Transport и проверяется настоящим обменом, а не фактом открытого порта.
      *
      * No confirmation is possible without the reader — returns true only if the frame was written to the
      * socket. Does NOT require start() to be up. Hold the socket ~600ms before close so the router has
      * time to forward the inject (a 150ms close was too short and dropped the frame).
      */
     public boolean writeOnceCoexist(int table, int index, String type, long value) {
-        byte[] pkt = frame(SET, WRITE_VAL, reqPayload(table, index, encodeInt(type, value)), FC, APP, seqCoexist++ & 0xFFFF);
+        byte[] pkt = tr.wrap(frame(SET, WRITE_VAL, reqPayload(table, index, encodeInt(type, value)),
+                FC, tr.src, tr.cmdType, seqCoexist++ & 0xFFFF));
         Socket s = new Socket();
         try {
             s.setTcpNoDelay(true);
-            s.connect(new InetSocketAddress("127.0.0.1", 40008), 1500);
+            s.connect(new InetSocketAddress("127.0.0.1", tr.injectPort), 1500);
             OutputStream out = s.getOutputStream();
             out.write(pkt); out.flush();
-            Logger.i("[duml] coexist write (40008) idx=" + index + " val=" + value + " " + hex(pkt));
+            Logger.i("[duml] coexist write (" + tr.name + ") idx=" + index + " val=" + value + " " + hex(pkt));
             try { Thread.sleep(600); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
             return true;
         } catch (Throwable e) {
@@ -437,6 +464,65 @@ public final class Duml {
         } finally {
             try { s.close(); } catch (Throwable t) {}
         }
+    }
+
+    // ---- подбор транспорта ----
+
+    public interface ProbeCb {
+        void trying(Transport t, int n, int total);
+        boolean cancelled();
+    }
+
+    /**
+     * Перебрать варианты транспорта и вернуть первый, который РЕАЛЬНО ответил. null — ни один.
+     *
+     * Проверка — настоящий обмен `tableInfo(0)` (0xE0), а не факт открытого TCP-порта. Это
+     * принципиально: на rc331 доказано, что 40009 соединение принимает и молча выбрасывает кадры
+     * непривилегированного приложения. Подбор «по коннекту» (как в FreeFCC) выбрал бы такой порт
+     * и всё приложение отказало бы молча.
+     *
+     * 0xE0 выбран потому, что это ЧТЕНИЕ, оно и так первый шаг детекта и даёт однозначный ответ.
+     * Пробовать транспорт записью параметра нельзя: неизвестно, куда уйдёт кадр.
+     *
+     * Требует остановленной DJI Fly — как и обычный детект, поднимает ридер.
+     * `inv` может быть null; тогда пропуск по «порт не слушает» не работает и проверяются все.
+     */
+    public Transport probe(Listeners inv, ProbeCb cb) {
+        Transport[] cand = Transport.candidates();
+        Transport was = tr;
+        for (int i = 0; i < cand.length; i++) {
+            if (cb != null && cb.cancelled()) break;
+            Transport c = cand[i];
+            if (inv != null && !portsListening(inv, c)) {
+                Logger.i("[probe] " + c.name + ": порты не слушают — пропуск");
+                continue;
+            }
+            if (cb != null) cb.trying(c, i + 1, cand.length);
+            stop();
+            tr = c;
+            start();
+            long[] ti = null;
+            for (int a = 0; a < 3 && ti == null; a++) {
+                if (cb != null && cb.cancelled()) break;
+                sleep(250);                       // дать ридеру подняться
+                ti = tableInfo(0, 1200);
+            }
+            if (ti != null) {
+                Logger.i("[probe] " + c.name + ": ОТВЕТИЛ (crc=" + Long.toHexString(ti[0])
+                        + " count=" + ti[1] + ")");
+                return c;
+            }
+            Logger.i("[probe] " + c.name + ": нет ответа");
+            stop();
+            sleep(200);                           // не штормить роутер между кандидатами
+        }
+        tr = was;                                 // ничего не подошло — вернуть как было
+        return null;
+    }
+
+    private static boolean portsListening(Listeners inv, Transport t) {
+        for (int p : t.ports()) if (!inv.isListening(p)) return false;
+        return true;
     }
 
     private static void sleep(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) {} }

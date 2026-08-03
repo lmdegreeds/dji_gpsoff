@@ -24,8 +24,8 @@ import android.widget.Toast;
  * Floating control overlay that sits ON TOP of DJI Fly — same trick as the fcc bundle's gesture app
  * (com.djifcc.labdron.gesture / OverlayService): a TYPE_APPLICATION_OVERLAY window with FLAG_NOT_FOCUSABLE,
  * so DJI Fly keeps focus/video and is never minimised. A small draggable handle (≡) expands a panel of
- * blind write-only toggles; each button fires Duml.writeOnceCoexist (0xE3 on 40008, no reader) — the path
- * we confirmed coexists with a running DJI Fly. NEVER reads (no 40007), so Fly's video mirror is untouched.
+ * blind write-only toggles; each button fires Duml.writeOnceCoexist (0xE3, no reader) — the path
+ * we confirmed coexists with a running DJI Fly. NEVER reads, so Fly's video mirror is untouched.
  *
  * Param indices are resolved by MainActivity (from the detected/cached model) and passed via the intent.
  */
@@ -34,7 +34,7 @@ public final class OverlayService extends Service {
     private WindowManager wm;
     private View handle;
     private View panel;
-    private final Duml duml = new Duml();   // write-only; start() is never called → no 40007 reader
+    private final Duml duml = new Duml();   // write-only; start() is never called → ридера нет
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private String[] onLabels, offLabels, types;
@@ -45,6 +45,13 @@ public final class OverlayService extends Service {
 
     @Override public int onStartCommand(Intent it, int flags, int startId) {
         Logger.attachFile(this);              // нажатия в оверлее — в тот же журнал, что и мастер
+        // Оверлей пишет отдельным экземпляром Duml, который подбора не проходил: без этого на
+        // не-rc331 пульте тумблеры молча писали бы в дефолтный порт, которого там может не быть.
+        // Имя транспорта передаёт MainActivity — она держит живой движок и знает точный ключ пульта.
+        // Кеш по Build.DEVICE — запасной путь на случай перезапуска сервиса по START_STICKY без extras.
+        Transport t = it != null ? Transport.byName(it.getStringExtra("transport")) : null;
+        if (t == null) t = Transport.byName(new Store(this).transport(Store.rcKey("")));
+        if (t != null) duml.setTransport(t);
         if (it != null && it.hasExtra("indices")) {
             indices   = it.getIntArrayExtra("indices");
             onVals    = it.getLongArrayExtra("onVals");
@@ -71,7 +78,7 @@ public final class OverlayService extends Service {
         Notification.Builder b = Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, ch) : new Notification.Builder(this);
         return b.setContentTitle("GPS/LED — оверлей")
-                .setContentText("Тумблеры поверх DJI Fly (40008)")
+                .setContentText("Тумблеры поверх DJI Fly")
                 .setSmallIcon(android.R.drawable.ic_menu_manage)
                 .setOngoing(true).build();
     }
@@ -175,7 +182,7 @@ public final class OverlayService extends Service {
         return b;
     }
 
-    /** Filled rounded pill button (app style), white text; fires a write-only 40008 inject. */
+    /** Filled rounded pill button (app style), white text; fires a write-only inject. */
     private Button pillBtn(String text, int fill, int idx, String type, long val) {
         Button b = new Button(this);
         b.setText(text);
@@ -191,7 +198,8 @@ public final class OverlayService extends Service {
         b.setPadding(dp(4), dp(10), dp(4), dp(10));
         autoSize(b, 11, 15);
         b.setOnClickListener(v -> {
-            Logger.i("[overlay] tap '" + text + "' idx=" + idx + " val=" + val + " type=" + type + " -> 40008");
+            Logger.i("[overlay] tap '" + text + "' idx=" + idx + " val=" + val + " type=" + type
+                    + " -> " + duml.transport().name);
             new Thread(() -> {
                 final boolean ok = duml.writeOnceCoexist(0, idx, type, val);
                 Logger.i("[overlay] tap '" + text + "' sent=" + ok);
