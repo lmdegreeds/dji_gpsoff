@@ -52,6 +52,21 @@ public final class MainActivity extends Activity implements Detector.Listener {
                              STEP_RESULT = 3, STEP_HUB = 4, STEP_CONSENT = 5;
     private int step = STEP_STOP;
 
+    /** Фраза, с которой Detector начинает последнюю стадию — линейный перебор всей таблицы. */
+    private static final String SCAN_PHASE = "Полный перебор";
+
+    /**
+     * Предупреждение о долгом переборе. Показывается заранее (шаг 2), в момент, когда перебор
+     * действительно начался, и рядом с ручным вводом — то есть везде, где у пользователя ещё
+     * есть выбор между «ждать» и «вписать номера самому».
+     */
+    private static final String SLOW_HINT =
+            "Если модель незнакомая, дело дойдёт до полного перебора таблицы — это 10–20 минут: "
+            + "приложение читает с борта имя каждого параметра. Ждать необязательно: выгрузи "
+            + "параметры дрона по USB утилитой dh_v1.48_signed.exe, найди там номера (index) "
+            + "строк gps_enable, forearm_led_ctrl и fswitch_selection и впиши их вручную — "
+            + "приложение всё равно сверит каждое имя с бортом.";
+
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Duml duml = new Duml();
     private final QuickParam[] params = QuickParam.all();
@@ -294,6 +309,7 @@ public final class MainActivity extends Activity implements Detector.Listener {
         caption("ШАГ 2 · ВКЛЮЧИ ДРОН");
         note("Включи дрон и дождись связи с пультом (индикатор в DJI Fly / писк). "
                 + "Дрон должен стоять на земле в покое.");
+        note("Знакомая модель определяется за секунды. " + SLOW_HINT);
         action("Подключиться", ACCENT, v -> startDetect());
         action("Назад", TXT_SUB, v -> { step = STEP_STOP; render(); });
     }
@@ -309,12 +325,32 @@ public final class MainActivity extends Activity implements Detector.Listener {
         t.setPadding(dp(16), dp(14), dp(16), dp(14));
         body.addView(t);
         note("Идёт чтение имён параметров с борта. Не закрывай приложение.");
+
+        // Предупреждение зажигается только когда перебор реально начался: до этого момента
+        // поиск обычно укладывается в секунды, и пугать им незачем.
+        TextView slow = new TextView(this);
+        slow.setTag("slow");
+        slow.setText(SLOW_HINT);
+        slow.setTextColor(AMBER);
+        slow.setTextSize(13);
+        slow.setPadding(dp(16), dp(6), dp(16), dp(10));
+        slow.setVisibility(isScanning() ? View.VISIBLE : View.GONE);
+        body.addView(slow);
+
         action("Отмена", RED, v -> { if (detector != null) detector.cancel(); });
+        // Отмена приводит на экран результата, где есть ручной ввод, — отдельная кнопка нужна
+        // лишь для того, чтобы этот выход был виден во время долгого перебора.
+        action("Прервать и вписать номера вручную", ACCENT,
+                v -> { if (detector != null) detector.cancel(); });
     }
+
+    private boolean isScanning() { return detectPhase.startsWith(SCAN_PHASE); }
 
     private void updateDetectText() {
         View t = body.findViewWithTag("detect");
         if (t instanceof TextView) ((TextView) t).setText(detectPhase);
+        View slow = body.findViewWithTag("slow");
+        if (slow != null) slow.setVisibility(isScanning() ? View.VISIBLE : View.GONE);
     }
 
     /** Шаг 4 — результат детекта + ручной ввод + сохранение. */
@@ -322,9 +358,14 @@ public final class MainActivity extends Activity implements Detector.Listener {
         caption("РЕЗУЛЬТАТ");
         if (detectError != null) {
             statusLine(detectError, RED);
-            action("Повторить", ACCENT, v -> { step = STEP_CONNECT; render(); });
-            action("Не получилось — открыть диагностику", TXT_SUB, v -> openAbout());
-            return;
+            // Борт не ответил — проверять номер по имени нечем, ручной ввод бесполезен.
+            if (boardCrc == 0) {
+                action("Повторить", ACCENT, v -> { step = STEP_CONNECT; render(); });
+                action("Не получилось — открыть диагностику", TXT_SUB, v -> openAbout());
+                return;
+            }
+            // Отмена посреди перебора: часть параметров могла найтись, остальные вписываются
+            // руками — поэтому дальше рисуем обычный результат с полями ввода.
         }
         for (QuickParam q : params) {
             if (q.idx >= 0) statusLine("✓ " + q.title + " · " + q.key + " → idx " + q.idx
@@ -336,8 +377,11 @@ public final class MainActivity extends Activity implements Detector.Listener {
         else if (crcKey != null) note("Прошивка: " + crcKey + " (модель не определена)");
 
         caption("РУЧНОЙ ВВОД ID (с проверкой имени)");
-        note("Если авто-детект ошибся или не нашёл — впиши индекс и нажми «Проверить»: "
-                + "запишем только при совпадении имени с бортом.");
+        note("Если авто-детект ошибся, не нашёл или ждать перебор не хочется — впиши индекс "
+                + "и нажми «Проверить»: запишем только при совпадении имени с бортом.");
+        note("Где взять номера: подключи дрон к ПК по USB и выгрузи таблицу параметров "
+                + "утилитой dh_v1.48_signed.exe — в выгрузке у каждой строки есть номер (index) "
+                + "и имя. Нужны gps_enable, forearm_led_ctrl и fswitch_selection.");
         for (QuickParam q : params) manualRow(q);
 
         boolean any = false;

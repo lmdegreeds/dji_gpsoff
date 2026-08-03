@@ -264,7 +264,7 @@ public final class Detector {
             if (nm != null && !nm.isEmpty()) live.put(idx, shortOf(nm));
         }
         log("проба: прочитано " + live.size() + "/" + probes.length);
-        return db.pickByProbe(live);
+        return db.pickByProbe(live, count);
     }
 
     /**

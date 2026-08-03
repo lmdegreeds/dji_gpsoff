@@ -10,9 +10,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Таблица моделей из assets/models.tsv — по одной строке на модель: crc, встреченные count,
+ * Таблица моделей из assets/models.tsv — строка на прошивку: crc, встреченные count,
  * индексы трёх быстрых параметров, кодовые имена борта и «отпечаток» содержимого таблицы.
  * Генерируется tools/gen_models.py из дампов и телеметрии.
+ *
+ * Строк с одним и тем же code может быть НЕСКОЛЬКО — это варианты прошивок одной модели,
+ * у которых таблица переехала (например, Neo 2 и Lito X1). Варианты не мешают опознанию:
+ * для выбора модели строки с одинаковым code считаются одной моделью, а между самими
+ * вариантами разбирается живая сверка имени — индексы всех вариантов идут в кандидаты.
  *
  * Даёт три вещи: (1) индекс параметра по имени для опознанной модели, (2) опознание модели
  * по отпечатку, когда crc неизвестен, (3) список индексов-кандидатов по всем моделям.
@@ -112,23 +117,39 @@ public final class ModelDb {
      */
     public Entry pick(long crc, long count, String acModel) {
         if (crc != 0) {
-            for (Entry e : entries)                                          // 1) точное crc+count
-                if (e.crc == crc && e.hasCount(count)) return e;
-            for (Entry e : entries)                                          // 2) crc + кодовое имя
-                if (e.crc == crc && e.hasBoard(acModel)) return e;
             List<Entry> byCrc = new ArrayList<>();
             for (Entry e : entries) if (e.crc == crc) byCrc.add(e);
-            if (byCrc.size() == 1) return byCrc.get(0);                      // 3) единственный crc
-            if (byCrc.size() > 1) {                                          // 4) ближайший count
-                Entry best = byCrc.get(0);
-                for (Entry e : byCrc) if (e.countDistance(count) < best.countDistance(count)) best = e;
-                return best;
+
+            List<Entry> exact = new ArrayList<>();                           // 1) точное crc+count
+            for (Entry e : byCrc) if (e.hasCount(count)) exact.add(e);
+            if (!exact.isEmpty()) {
+                if (exact.size() > 1)
+                    Logger.i("[db] crc+count дают " + exact.size() + " варианта — беру "
+                            + exact.get(0) + ", остальные останутся кандидатами");
+                return exact.get(0);
             }
+            List<Entry> byBoardCrc = new ArrayList<>();                      // 2) crc + кодовое имя
+            for (Entry e : byCrc) if (e.hasBoard(acModel)) byBoardCrc.add(e);
+            if (!byBoardCrc.isEmpty()) return nearestCount(byBoardCrc, count);
+            if (!byCrc.isEmpty()) return nearestCount(byCrc, count);         // 3-4) ближайший count
         }
         List<Entry> byBoard = new ArrayList<>();                             // 5-6) только кодовое имя
         for (Entry e : entries) if (e.hasBoard(acModel)) byBoard.add(e);
-        if (byBoard.size() == 1) return byBoard.get(0);
+        // Несколько строк одной модели — это её варианты прошивки, а не двусмысленность.
+        if (!byBoard.isEmpty() && oneCode(byBoard)) return nearestCount(byBoard, count);
         return null;
+    }
+
+    /** Ближайшая по числу параметров запись; при равенстве — первая в файле. */
+    private static Entry nearestCount(List<Entry> list, long count) {
+        Entry best = list.get(0);
+        for (Entry e : list) if (e.countDistance(count) < best.countDistance(count)) best = e;
+        return best;
+    }
+
+    private static boolean oneCode(List<Entry> list) {
+        for (Entry e : list) if (!e.code.equals(list.get(0).code)) return false;
+        return true;
     }
 
     /** true, если выбор сделан только по кодовому имени и count далеко — стоит показать в UI. */
@@ -140,12 +161,14 @@ public final class ModelDb {
 
     /**
      * Опознать модель по живым именам на индексах-пробах: +1 за совпадение префикса,
-     * −1 за явное расхождение, «-» игнорируется. Принимаем лучшую при score ≥ 2 и строго
-     * больше второй — иначе неоднозначно и лучше честно вернуть null.
+     * −1 за явное расхождение, «-» игнорируется. Считаем по МОДЕЛИ (все строки с одним code
+     * дают лучший из своих счётов): у варианта прошивки отпечатка нет, и без группировки он
+     * бы занижал счёт своей же модели. Принимаем лучшую при score ≥ 2 и строго больше второй
+     * (другой модели) — иначе неоднозначно и лучше честно вернуть null. Между вариантами
+     * одной модели выбираем по ближайшему числу параметров.
      */
-    public Entry pickByProbe(Map<Integer, String> live) {
-        Entry best = null;
-        int bestScore = Integer.MIN_VALUE, secondScore = Integer.MIN_VALUE;
+    public Entry pickByProbe(Map<Integer, String> live, long count) {
+        java.util.LinkedHashMap<String, Integer> byCode = new java.util.LinkedHashMap<>();
         for (Entry e : entries) {
             int score = 0;
             for (int k = 0; k < probes.length && k < e.fp.length; k++) {
@@ -154,14 +177,25 @@ public final class ModelDb {
                 if (want == null || "-".equals(want) || got == null || got.isEmpty()) continue;
                 score += got.length() >= want.length() && got.startsWith(want) ? 1 : -1;
             }
-            if (score > bestScore) { secondScore = bestScore; bestScore = score; best = e; }
+            Integer prev = byCode.get(e.code);
+            if (prev == null || score > prev) byCode.put(e.code, score);
+        }
+        String bestCode = null;
+        int bestScore = Integer.MIN_VALUE, secondScore = Integer.MIN_VALUE;
+        for (Map.Entry<String, Integer> m : byCode.entrySet()) {
+            int score = m.getValue();
+            if (score > bestScore) { secondScore = bestScore; bestScore = score; bestCode = m.getKey(); }
             else if (score > secondScore) secondScore = score;
         }
-        if (best == null || bestScore < 2 || bestScore <= secondScore) {
+        if (bestCode == null || bestScore < 2 || bestScore <= secondScore) {
             Logger.i("[db] проба: неоднозначно (лучший " + bestScore + ", второй " + secondScore + ")");
             return null;
         }
-        Logger.i("[db] проба: " + best + " (" + bestScore + "/" + probes.length + ")");
+        List<Entry> variants = new ArrayList<>();
+        for (Entry e : entries) if (e.code.equals(bestCode)) variants.add(e);
+        Entry best = nearestCount(variants, count);
+        Logger.i("[db] проба: " + best + " (" + bestScore + "/" + probes.length
+                + (variants.size() > 1 ? ", вариантов " + variants.size() : "") + ")");
         return best;
     }
 

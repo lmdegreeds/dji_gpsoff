@@ -44,6 +44,24 @@ LABELS = {
     "wm260": "Mavic 3",     "wm261": "Mavic 3 Pro",
 }
 
+# Варианты прошивок, для которых дампа нет: индексы пришли из телеметрии, а она отдаёт
+# ТОЛЬКО проверенные живьём по имени номера (Detector коммитит индекс лишь после get_info).
+# Каждый вариант — отдельная строка models.tsv с тем же кодом модели; отпечатка у него нет,
+# поэтому в опознании по содержимому он опирается на строку дампа своей модели, а между
+# вариантами разбирается живая сверка имени.
+#
+# Вписывай сюда только то, что противоречит дампу или в дампе отсутствует — совпадающие
+# с дампом строки телеметрии подхватываются merge_telemetry сами.
+VARIANTS = [
+    # Neo 2 с тем же паспортом (crc+count), что и дамп, но с переехавшей таблицей:
+    # led совпал, gps/fsw уехали (в дампе 377 = dead_zone_for_m, 130 = compass_fdi_open_stuck).
+    {"code": "wa020", "crc": 0x2ae1a5ad, "count": 1571,
+     "forearm_led_ctrl": 4, "gps_enable": 377, "fswitch_selection": 130},
+    # Lito X1, прошивка новее дампа (1593 → 1594) и с другим crc.
+    {"code": "wa151", "crc": 0x2ae1a5ad, "count": 1594,
+     "forearm_led_ctrl": 23, "gps_enable": 382, "fswitch_selection": 133},
+]
+
 
 class Fail(Exception):
     pass
@@ -95,6 +113,14 @@ def index_of(dump, short):
     return -1
 
 
+def variant_of(crc, count, board):
+    """Объявленный вручную вариант прошивки для этой строки телеметрии, или None."""
+    for v in VARIANTS:
+        if v["crc"] == crc and v["count"] == count and (not board or board == v["code"]):
+            return v
+    return None
+
+
 def merge_telemetry(models):
     """Добавить в модели данные из ids.json: реальные count, недостающие crc, кодовые
     имена бортов. Строки со всеми null-индексами всё равно полезны — они несут crc/count/model."""
@@ -116,6 +142,18 @@ def merge_telemetry(models):
         count = int(r.get("count") or 0)
         board = (r.get("model") or "").strip().lower()
         if not count:
+            continue
+
+        # Паспорт объявлен вариантом — модель для него уже задана вручную, дамп трогать
+        # нельзя. Сверяем только, что индексы из поля совпали с объявленными.
+        v = variant_of(crc, count, board)
+        if v is not None:
+            for p in PARAMS:
+                got = r.get(p)
+                if got is not None and int(got) != v[p]:
+                    raise Fail("вариант %s (crc=%08x count=%d): телеметрия даёт %s=%d, "
+                               "в VARIANTS %d — разберись вручную"
+                               % (v["code"], crc, count, p, int(got), v[p]))
             continue
 
         # Сопоставляем строку телеметрии с моделью: сначала точно (crc,count), затем по
@@ -229,27 +267,44 @@ def build():
 
     merge_telemetry(models)
 
-    # (crc, count) должен однозначно указывать на модель — это главное правило выбора в ModelDb
+    # Варианты прошивок без дампа: имён у них нет, поэтому и отпечатка нет.
+    for v in VARIANTS:
+        if v["code"] not in {m["code"] for m in models}:
+            raise Fail("вариант ссылается на модель %s, дампа которой нет" % v["code"])
+        m = {
+            "code": v["code"], "crc": v["crc"], "counts": [v["count"]],
+            "boards": [v["code"]], "names": {}, "variant": True,
+            "label": LABELS.get(v["code"], v["code"].upper()),
+        }
+        for p in PARAMS:
+            m[p] = int(v[p])
+        models.append(m)
+
+    # (crc, count) должен однозначно указывать на МОДЕЛЬ — это главное правило выбора в
+    # ModelDb. Несколько строк одной модели на один паспорт допустимы: это её варианты,
+    # и разбирается между ними живая сверка имени.
     seen = {}
     for m in models:
         if not m["crc"]:
             continue
         for c in m["counts"]:
             other = seen.get((m["crc"], c))
-            if other and other is not m:
+            if other and other["code"] != m["code"]:
                 raise Fail("(crc=%08x count=%d) указывает и на %s, и на %s"
                            % (m["crc"], c, other["code"], m["code"]))
             seen[(m["crc"], c)] = m
 
-    probes = pick_probe_indices(models)
+    probes = pick_probe_indices([m for m in models if not m.get("variant")])
 
     lines = [
         "#djiquick-models v1  params=%s  type=U8" % ",".join(PARAMS),
         "#P\tиндексы-пробы для опознания модели по содержимому",
         "#M\tcode\tcrc\tcounts\tled\tgps\tfsw\tboards\tfp\tlabel",
+        "#M\tстрок с одним code может быть несколько — варианты прошивок одной модели",
         "P\t" + "\t".join(str(i) for i in probes),
     ]
-    for m in sorted(models, key=lambda x: x["code"]):
+    # Дамп модели идёт перед её вариантами: он проверен по именам, вариант — только по полю.
+    for m in sorted(models, key=lambda x: (x["code"], bool(x.get("variant")), min(x["counts"]))):
         fp = "|".join((m["names"].get(i) or "-")[:FP_LEN] for i in probes)
         lines.append("\t".join([
             "M", m["code"], "%08x" % m["crc"],
@@ -277,17 +332,19 @@ def main():
         if cur != text:
             print("ОШИБКА: %s расходится с генератором — перегенерируй" % OUT)
             return 1
-        print("OK: %s актуален (%d моделей)" % (OUT, len(models)))
+        print("OK: %s актуален (%d строк)" % (OUT, len(models)))
         return 0
 
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
-    print("записано %s: %d моделей, %d байт, пробы %s"
-          % (OUT, len(models), len(text.encode("utf-8")), probes))
-    for m in sorted(models, key=lambda x: x["code"]):
-        print("  %-6s crc=%08x counts=%-14s led=%-5d gps=%-5d fsw=%-5d boards=%s"
+    print("записано %s: %d строк (%d вариантов), %d байт, пробы %s"
+          % (OUT, len(models), sum(1 for m in models if m.get("variant")),
+             len(text.encode("utf-8")), probes))
+    for m in sorted(models, key=lambda x: (x["code"], bool(x.get("variant")), min(x["counts"]))):
+        print("  %-6s crc=%08x counts=%-14s led=%-5d gps=%-5d fsw=%-5d boards=%s%s"
               % (m["code"], m["crc"], ",".join(str(c) for c in sorted(m["counts"])),
-                 m[PARAMS[0]], m[PARAMS[1]], m[PARAMS[2]], ",".join(sorted(m["boards"]))))
+                 m[PARAMS[0]], m[PARAMS[1]], m[PARAMS[2]], ",".join(sorted(m["boards"])),
+                 "  (вариант)" if m.get("variant") else ""))
     return 0
 
 
